@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 function App() {
   const baseUrl = useMemo(() => {
@@ -15,9 +15,28 @@ function App() {
   const [history, setHistory] = useState([])
   const [status, setStatus] = useState('')
 
+  // Voice recognition
+  const [listening, setListening] = useState(false)
+  const [autoPlan, setAutoPlan] = useState(true)
+  const [voiceNote, setVoiceNote] = useState('')
+  const recognitionRef = useRef(null)
+  const restartTimeoutRef = useRef(null)
+
+  const langCode = useMemo(() => (language === 'bn' ? 'bn-BD' : 'en-US'), [language])
+
   useEffect(() => {
     refreshPairs()
     refreshHistory()
+  }, [])
+
+  useEffect(() => {
+    // Cleanup on unmount
+    return () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.onresult = null; recognitionRef.current.onend = null; recognitionRef.current.onerror = null; recognitionRef.current.stop() } catch {}
+      }
+      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current)
+    }
   }, [])
 
   const refreshPairs = async () => {
@@ -62,8 +81,9 @@ function App() {
     }
   }
 
-  const plan = async () => {
-    if (!text.trim()) return
+  const plan = async (overrideText) => {
+    const toPlan = typeof overrideText === 'string' ? overrideText : text
+    if (!toPlan.trim()) return
     setPlanning(true)
     setPlanned(null)
     setStatus('Planning...')
@@ -71,7 +91,7 @@ function App() {
       const res = await fetch(`${baseUrl}/plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language, device_id: deviceId || null }),
+        body: JSON.stringify({ text: toPlan, language, device_id: deviceId || null }),
       })
       if (!res.ok) throw new Error('Failed to plan')
       const data = await res.json()
@@ -83,6 +103,69 @@ function App() {
     } finally {
       setPlanning(false)
     }
+  }
+
+  const startListening = () => {
+    if (listening) return
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) {
+      setStatus('Voice not supported in this browser. Try Chrome on desktop/mobile.')
+      return
+    }
+    const rec = new SR()
+    rec.continuous = true
+    rec.interimResults = true
+    rec.lang = langCode
+
+    rec.onresult = (event) => {
+      let interim = ''
+      let finalText = ''
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalText += transcript + ' '
+        } else {
+          interim += transcript + ' '
+        }
+      }
+      if (interim) setVoiceNote(interim.trim())
+      if (finalText) {
+        const utterance = finalText.trim()
+        setVoiceNote('')
+        setText(utterance)
+        if (autoPlan) plan(utterance)
+      }
+    }
+    rec.onerror = (e) => {
+      setStatus(`Voice error: ${e.error || 'unknown'}`)
+    }
+    rec.onend = () => {
+      if (listening) {
+        // Auto-restart to keep continuous
+        restartTimeoutRef.current = setTimeout(() => {
+          try { rec.start() } catch {}
+        }, 200)
+      }
+    }
+
+    recognitionRef.current = rec
+    try {
+      rec.start()
+      setListening(true)
+      setStatus('Listening... 🎤')
+    } catch (e) {
+      setStatus('Could not start microphone: ' + (e.message || 'unknown'))
+    }
+  }
+
+  const stopListening = () => {
+    setListening(false)
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop() } catch {}
+    }
+    if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current)
+    setVoiceNote('')
+    setStatus('Stopped listening')
   }
 
   return (
@@ -107,7 +190,7 @@ function App() {
                 onChange={(e) => setText(e.target.value)}
                 placeholder="যেমন: মায়েরে কল দাও / Open YouTube and play lo-fi"
               />
-              <div className="flex gap-3 items-center">
+              <div className="flex flex-wrap gap-3 items-center">
                 <select
                   className="border rounded px-3 py-2"
                   value={language}
@@ -117,7 +200,7 @@ function App() {
                   <option value="en">English</option>
                 </select>
                 <input
-                  className="flex-1 border rounded px-3 py-2"
+                  className="flex-1 border rounded px-3 py-2 min-w-[180px]"
                   placeholder="Optional: Device ID"
                   value={deviceId}
                   onChange={(e) => setDeviceId(e.target.value)}
@@ -130,6 +213,28 @@ function App() {
                   {planning ? 'Planning...' : 'Create Plan'}
                 </button>
               </div>
+
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                {!listening ? (
+                  <button onClick={startListening} className="flex items-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-lg">
+                    <span>Start Voice</span>
+                    <span>🎤</span>
+                  </button>
+                ) : (
+                  <button onClick={stopListening} className="flex items-center gap-2 bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded-lg">
+                    <span>Stop</span>
+                    <span>⏹️</span>
+                  </button>
+                )}
+                <label className="flex items-center gap-2 text-sm text-gray-700 select-none">
+                  <input type="checkbox" checked={autoPlan} onChange={(e) => setAutoPlan(e.target.checked)} />
+                  Auto plan on voice
+                </label>
+                {voiceNote && (
+                  <span className="text-sm text-gray-600 italic truncate max-w-full">{voiceNote}</span>
+                )}
+              </div>
+
               {status && <p className="text-sm text-gray-600">{status}</p>}
             </div>
 
